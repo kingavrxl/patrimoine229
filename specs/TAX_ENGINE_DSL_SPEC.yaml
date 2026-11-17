@@ -1,0 +1,1095 @@
+# TAX_ENGINE_DSL_SPEC.yaml — Langage de règles fiscales OPT
+#
+# Langage déclaratif YAML pour codifier la fiscalité transfrontalière.
+# PRINCIPES :
+#   - AUCUNE logique fiscale en dur dans le code du moteur. Tout est dans le DSL.
+#   - Déclaratif (forward-chaining), pas impératif.
+#   - Versionné par millésime (année fiscale) et juridiction.
+#   - Chaque règle produit une trace d'explication (explanation trace).
+#   - Révisé externement chaque trimestre par un cabinet fiscal.
+#
+# Propriétaire : Fiscaliste en chef + Lead dev moteur
+# Statut : Spécification implémentable directement
+
+meta:
+  dsl_version: "1.0"
+  created_at: "2026-11-16"
+  owner: "fiscaliste_en chef"
+  review_cycle: "quarterly"
+  external_audit: "mandatory_before_production"
+  test_coverage_required: 100  # 100% des règles fiscales couvertes par des tests YAML
+
+# ============================================================================
+# GRAMMAIRE DU DSL
+# ============================================================================
+
+grammar:
+  # Un fichier de règles par juridiction et par année fiscale.
+  # Exemple : fr_2026.yaml, ch_2026.yaml, us_2026.yaml, uk_2026.yaml
+
+  document:
+    type: object
+    required: [jurisdiction, tax_year, rules]
+    properties:
+      jurisdiction:
+        type: string
+        pattern: '^[A-Z]{2}$'  # ISO 3166-1 alpha-2 : FR, CH, US, UK, BE, LU, SG, AE
+      tax_year:
+        type: integer
+        minimum: 2020
+      treaties:  # conventions bilatérales applicables à cette juridiction
+        type: array
+        items: $ref: '#/definitions/treaty'
+      rules:
+        type: array
+        items: $ref: '#/definitions/rule'
+
+  definitions:
+    rule:
+      type: object
+      required: [id, jurisdiction, tax_year, type, condition, effect, explanation, source]
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Z]{2}[0-9]{3}[A-Z]?$'  # ex: FR001A, CH010
+          description: "Identifiant unique de règle, immutable dans le temps"
+        jurisdiction:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        tax_year:
+          type: integer
+        type:
+          type: string
+          enum: [rate, bracket, exemption, credit, treaty, timing, condition]
+          description: |
+            rate       : taux d'imposition applicable à une base
+            bracket    : barème progressif (tranches)
+            exemption  : abattement / exonération partielle ou totale
+            credit     : crédit d'impôt (élimination double imposition)
+            treaty     : règle issue d'une convention bilatérale
+            timing     : règle de temporalité (délai de détention, année civile, etc.)
+            condition  : prédicat réutilisable (résidence, statut, etc.)
+        condition:
+          type: object
+          description: "Prédicat d'application. Si faux, la règle ne s'applique pas."
+          $ref: '#/definitions/expression'
+        effect:
+          type: object
+          description: "Effet de la règle quand la condition est vraie."
+          oneOf:
+            - $ref: '#/definitions/effect_rate'
+            - $ref: '#/definitions/effect_bracket'
+            - $ref: '#/definitions/effect_exemption'
+            - $ref: '#/definitions/effect_credit'
+            - $ref: '#/definitions/effect_treaty'
+            - $ref: '#/definitions/effect_timing'
+        explanation:
+          type: object
+          required: [title, detail, source_url, uncertainty_level]
+          properties:
+            title:
+              type: string
+              description: "Titre lisible par un non-expert (ex: 'PFU sur plus-values mobilières')"
+            detail:
+              type: string
+              description: "Explication détaillée de la règle appliquée"
+            source_url:
+              type: string
+              description: "URL source officielle (BOFIP, administration fiscale, loi)"
+            uncertainty_level:
+              type: string
+              enum: [low, medium, high, grey_zone]
+              description: "Niveau d'incertitude. 'grey_zone' → recommander expert humain."
+        source:
+          type: object
+          required: [reference, type]
+          properties:
+            reference:
+              type: string
+              description: "Référence légale (article, alinéa, convention, BOFIP)"
+            type:
+              type: string
+              enum: [law, regulation, treaty, bofip, administrative_doctrine, case_law]
+        priority:
+          type: integer
+          default: 100
+          description: "Ordre d'application quand plusieurs règles concourent (plus bas = prioritaire)"
+        applies_to:
+          type: array
+          items:
+            type: string
+          description: "Types de revenus ou actifs concernés (ex: [capital_gain, dividend, interest])"
+        active_from:
+          type: string
+          format: date
+          description: "Date d'entrée en vigueur"
+        active_until:
+          type: string
+          format: date
+          description: "Date de fin de validité (réforme, abrogation)"
+
+    expression:
+      type: object
+      description: "Arbre d'expression booléenne ou arithmétique."
+      oneOf:
+        - $ref: '#/definitions/expr_literal'
+        - $ref: '#/definitions/expr_field'
+        - $ref: '#/definitions/expr_op'
+        - $ref: '#/definitions/expr_function'
+
+    expr_literal:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [string, number, boolean, date, null]
+        value:
+          type: [string, number, boolean]
+
+    expr_field:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: "Chemin dans le contexte d'évaluation (ex: user.tax_residency.country)"
+
+    expr_op:
+      type: object
+      required: [operator, operands]
+      properties:
+        operator:
+          type: string
+          enum: [and, or, not, eq, neq, gt, gte, lt, lte, in, not_in, contains, matches]
+        operands:
+          type: array
+          minItems: 1
+          items: $ref: '#/definitions/expression'
+
+    expr_function:
+      type: object
+      required: [name, args]
+      properties:
+        name:
+          type: string
+          enum: [residence_in, has_tax_treaty, asset_type_is, account_type_is, holding_period_years, age_at, current_date, sum, multiply, convert_fx]
+        args:
+          type: array
+          items: $ref: '#/definitions/expression'
+
+    effect_rate:
+      type: object
+      required: [base, rate]
+      properties:
+        base:
+          $ref: '#/definitions/expression'
+          description: "Expression donnant la base d'imposition"
+        rate:
+          $ref: '#/definitions/expression'
+          description: "Taux d'imposition (décimal, ex: 0.30 pour 30%)"
+        result_field:
+          type: string
+          description: "Nom du champ où le résultat est stocké dans le contexte"
+
+    effect_bracket:
+      type: object
+      required: [base, brackets]
+      properties:
+        base:
+          $ref: '#/definitions/expression'
+        brackets:
+          type: array
+          items:
+            type: object
+            required: [from, to, rate]
+            properties:
+              from:
+                $ref: '#/definitions/expression'
+              to:
+                $ref: '#/definitions/expression'
+              rate:
+                $ref: '#/definitions/expression'
+        result_field:
+          type: string
+
+    effect_exemption:
+      type: object
+      required: [base, amount_or_rate]
+      properties:
+        base:
+          $ref: '#/definitions/expression'
+        amount_or_rate:
+          $ref: '#/definitions/expression'
+          description: "Montant fixe ou taux d'abattement"
+        result_field:
+          type: string
+
+    effect_credit:
+      type: object
+      required: [base, credit_rate, foreign_tax_paid]
+      properties:
+        base:
+          $ref: '#/definitions/expression'
+        credit_rate:
+          $ref: '#/definitions/expression'
+        foreign_tax_paid:
+          $ref: '#/definitions/expression'
+          description: "Impôt déjà payé à l'étranger (pour crédit d'impôt)"
+        result_field:
+          type: string
+
+    effect_treaty:
+      type: object
+      required: [treaty_id, article, override_rate]
+      properties:
+        treaty_id:
+          type: string
+        article:
+          type: string
+        override_rate:
+          $ref: '#/definitions/expression'
+          description: "Taux réduit par convention (remplace le taux interne)"
+        result_field:
+          type: string
+
+    effect_timing:
+      type: object
+      required: [rule_id, condition, consequence]
+      properties:
+        rule_id:
+          type: string
+          description: "Identifiant de la règle dont le timing est modifié"
+        condition:
+          $ref: '#/definitions/expression'
+        consequence:
+          type: string
+          enum: [defer, accelerate, prorate, suspend]
+
+    treaty:
+      type: object
+      required: [id, partner_country, signed_at, in_force_at]
+      properties:
+        id:
+          type: string
+        partner_country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        signed_at:
+          type: string
+          format: date
+        in_force_at:
+          type: string
+          format: date
+        model:
+          type: string
+          enum: [oecd_model, un_model, us_model, custom]
+        articles:
+          type: array
+          items:
+            type: object
+            required: [article_number, title, content_summary]
+            properties:
+              article_number:
+                type: string
+              title:
+                type: string
+              content_summary:
+                type: string
+
+# ============================================================================
+# CONTEXTE D'ÉVALUATION (ce que le moteur reçoit en entrée)
+# ============================================================================
+
+evaluation_context:
+  description: "Objet JSON transmis au moteur d'inférence pour chaque calcul."
+  type: object
+  required: [user, portfolio, simulation_event, tax_year, jurisdictions]
+  properties:
+    user:
+      type: object
+      properties:
+        id:
+          type: string
+        tax_residencies:
+          type: array
+          items:
+            type: object
+            properties:
+              country_code:
+                type: string
+              is_primary:
+                type: boolean
+              start_date:
+                type: string
+                format: date
+              end_date:
+                type: string
+                format: date
+              confidence_score:
+                type: number
+        age:
+          type: integer
+        marital_status:
+          type: string
+          enum: [single, married, pacs, divorced, widowed]
+        number_of_dependents:
+          type: integer
+    portfolio:
+      type: object
+      properties:
+        total_net_worth:
+          type: number
+          currency: EUR
+        by_jurisdiction:
+          type: object
+          additionalProperties:
+            type: number
+        by_account_type:
+          type: object
+          additionalProperties:
+            type: number
+        holdings:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              isin:
+                type: string
+              asset_class:
+                type: string
+                enum: [equity, bond, fund, etf, crypto, real_estate, private_equity, other]
+              quantity:
+                type: number
+              currency:
+                type: string
+              current_price:
+                type: number
+              cost_basis:
+                type: number
+              currency_cost_basis:
+                type: string
+              tax_type:
+                type: string
+                enum: [ass_vie, pea, compte_ordinaire, titre_nu, assurance_vie_lux, 401k, ira, isa, pilier_3, other]
+              jurisdiction:
+                type: string
+              acquisition_date:
+                type: string
+                format: date
+              lots:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    acquisition_date:
+                      type: string
+                      format: date
+                    quantity:
+                      type: number
+                    price_per_unit:
+                      type: number
+                    currency:
+                      type: string
+    simulation_event:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [sale, donation, move_residence, death, rebalancing, tax_loss_harvesting, none]
+        details:
+          type: object
+          description: "Dépend du type d'événement (ex: pour une sale, les lots ciblés)"
+    tax_year:
+      type: integer
+    jurisdictions:
+      type: array
+      items:
+        type: string
+        pattern: '^[A-Z]{2}$'
+      description: "Juridictions à calculer (pays de résidence + pays de source)"
+    fx_rates:
+      type: object
+      additionalProperties:
+        type: number
+      description: "Taux de change vers la devise de référence (EUR par défaut)"
+
+# ============================================================================
+# RÈGLES D'EXEMPLE — 20 RÈGLES FR / CH / US / UK
+# ============================================================================
+# Chaque règle est testable via un scénario YAML (entrée → sortie attendue).
+# Ces règles sont des EXEMPLES à valider par le fiscaliste externe avant mise en prod.
+
+rules_france_2026:
+  jurisdiction: FR
+  tax_year: 2026
+  rules:
+    # --- FR001 : PFU (flat tax) sur plus-values mobilières ---
+    - id: FR001
+      type: rate
+      condition:
+        operator: and
+        operands:
+          - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: FR }] }
+          - { operator: in, operands: [{ path: event.type }, { type: literal, value: sale }] }
+          - { operator: in, operands: [{ path: holding.tax_type }, { type: literal, value: compte_ordinaire }] }
+      effect:
+        type: rate
+        base: { path: capital_gain_net }
+        rate: { type: literal, value: 0.128 }
+        result_field: tax_pfu_ir
+      explanation:
+        title: "Prélèvement forfaitaire unique (PFU) — partie IR"
+        detail: "Taux de 12,8 % sur le gain net de cession de valeurs mobilières (compte ordinaire, résident fiscal FR)."
+        source_url: "https://www.bofip.impots.gouv.fr/bofip/10750-PGP"
+        uncertainty_level: low
+      source:
+        reference: "CGI art. 200 A"
+        type: law
+      priority: 10
+      applies_to: [capital_gain]
+
+    # --- FR002 : Prélèvements sociaux sur plus-values mobilières ---
+    - id: FR002
+      type: rate
+      condition:
+        operator: and
+        operands:
+          - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: FR }] }
+          - { operator: eq, operands: [{ path: holding.tax_type }, { type: literal, value: compte_ordinaire }] }
+      effect:
+        type: rate
+        base: { path: capital_gain_net }
+        rate: { type: literal, value: 0.172 }
+        result_field: tax_pfu_social
+      explanation:
+        title: "Prélèvements sociaux (17,2 %)"
+        detail: "Prélèvements sociaux sur les plus-values mobilières (compte ordinaire, résident FR)."
+        source_url: "https://www.bofip.impots.gouv.fr/bofip/10751-PGP"
+        uncertainty_level: low
+      source:
+        reference: "CSS art. L136-7"
+        type: law
+      priority: 10
+      applies_to: [capital_gain]
+
+    # --- FR003 : Abattement pour durée de détention (cessions avant 2018, abrogé mais conservé pour heritage) ---
+    - id: FR003
+      type: exemption
+      condition:
+        operator: and
+        operands:
+          - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: FR }] }
+          - { operator: gte, operands: [{ path: holding.holding_period_years }, { type: literal, value: 2 }] }
+          - { operator: in, operands: [{ path: holding.tax_type }, { type: literal, value: pea }] }
+      effect:
+        type: exemption
+        base: { path: capital_gain_net }
+        amount_or_rate: { type: literal, value: 1.0 }  # 100% exonération PEA après 5 ans
+        result_field: tax_pea_exemption
+      explanation:
+        title: "Exonération PEA après 5 ans"
+        detail: "Plus-values exonérées d'IR et prélèvements sociaux sur PEA après 5 ans de détention (pas de retrait)."
+        source_url: "https://www.bofip.impots.gouv.fr/bofip/5733"
+        uncertainty_level: low
+      source:
+        reference: "CGI art. 157-0 A"
+        type: law
+      priority: 5
+      applies_to: [capital_gain]
+
+    # --- FR004 : IFI — barème progressif ---
+    - id: FR004
+      type: bracket
+      condition:
+        operator: eq
+        operands:
+          - { path: user.tax_residencies[0].country_code }
+          - { type: literal, value: FR }
+      effect:
+        type: bracket
+        base: { path: real_estate_net_value }
+        brackets:
+          - from: { type: literal, value: 0 }
+            to: { type: literal, value: 800000 }
+            rate: { type: literal, value: 0.0 }
+          - from: { type: literal, value: 800000 }
+            to: { type: literal, value: 1300000 }
+            rate: { type: literal, value: 0.005 }
+          - from: { type: literal, value: 1300000 }
+            to: { type: literal, value: 2570000 }
+            rate: { type: literal, value: 0.07 }
+          - from: { type: literal, value: 2570000 }
+            to: { type: literal, value: 5000000 }
+            rate: { type: literal, value: 0.10 }
+          - from: { type: literal, value: 5000000 }
+            to: { type: literal, value: 100000000 }
+            rate: { type: literal, value: 0.125 }
+          - from: { type: literal, value: 100000000 }
+            to: { type: literal, value: null }  # infinité
+            rate: { type: literal, value: 0.15 }
+        result_field: tax_ifi
+      explanation:
+        title: "IFI — Impôt sur la Fortune Immobilière"
+        detail: "Barème progressif sur la valeur nette taxable du patrimoine immobilier au-dessus de 1,3 M€ (seuil d'imposition), avec déclenchement à 800 000 € (seuil de déclaration)."
+        source_url: "https://www.bofip.impots.gouv.fr/bofip/13143"
+        uncertainty_level: low
+      source:
+        reference: "CGI art. 965 et suivants"
+        type: law
+      priority: 20
+      applies_to: [real_estate_wealth]
+
+    # --- FR005 : Assurance-vie — rachat partiel après 8 ans ---
+    - id: FR005
+      type: rate
+      condition:
+        operator: and
+        operands:
+          - { operator: eq, operands: [{ path: holding.tax_type }, { type: literal, value: ass_vie }] }
+          - { operator: gte, operands: [{ path: holding.holding_period_years }, { type: literal, value: 8 }] }
+          - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: FR }] }
+      effect:
+        type: rate
+        base: { path: gain_on_rachat }
+        rate: { type: literal, value: 0.075 }  # 7,5 % après abattement 4 600 € (célibataire) / 9 200 € (couple)
+        result_field: tax_assurance_vie_rachat
+      explanation:
+        title: "Rachat partiel assurance-vie après 8 ans"
+        detail: "Taux réduit de 7,5 % sur les gains (après abattement annuel 4 600 € / 9 200 €), prélèvements sociaux en sus (17,2 %)."
+        source_url: "https://www.bofip.impots.gouv.fr/bofip/11374"
+        uncertainty_level: low
+      source:
+        reference: "CGI art. 125-0 A"
+        type: law
+      priority: 15
+      applies_to: [assurance_vie_gain]
+
+    # --- FR006 : Exit tax (Art. 167 bis) — transfert de domicile hors France ---
+    - id: FR006
+      type: timing
+      condition:
+        operator: and
+        operands:
+          - { operator: eq, operands: [{ path: event.type }, { type: literal, value: move_residence }] }
+          - { operator: eq, operands: [{ path: event.details.from_country }, { type: literal, value: FR }] }
+          - { operator: neq, operands: [{ path: event.details.to_country }, { type: literal, value: FR }] }
+          - { operator: gte, operands: [{ path: user.portfolio.total_net_worth }, { type: literal, value: 800000 }] }
+          - { operator: gte, operands: [{ path: event.details.share_of_capital }, { type: literal, value: 0.5 }] }  # 50% + des droits de vote ou valeur
+      effect:
+        type: timing
+        rule_id: FR001  # la plus-value latente devient immédiatement imposable
+        condition: { type: literal, value: true }
+        consequence: accelerate
+      explanation:
+        title: "Exit tax France (Art. 167 bis CGI)"
+        detail: "Transfert de domicile fiscal hors France : imposition immédiate des plus-values latentes sur titres et droits sociaux (seuil 800 000 € + 50 % de contrôle). Suspension possible sous conditions (départ UE/EEA + garantie)."
+        source_url: "https://www.bofip.impots.gouv.fr/bofip/11200"
+        uncertainty_level: grey_zone
+      source:
+        reference: "CGI art. 167 bis"
+        type: law
+      priority: 1
+      applies_to: [exit_tax]
+
+    # --- FR007 : Donation — abattement parent-enfant 100 000 € tous les 15 ans ---
+    - id: FR007
+      type: exemption
+      condition:
+        operator: and
+        operands:
+          - { operator: eq, operands: [{ path: event.type }, { type: literal, value: donation }] }
+          - { operator: in, operands: [{ path: event.details.donor_recipient_relationship }, { type: literal, value: parent_child }] }
+          - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: FR }] }
+      effect:
+        type: exemption
+        base: { path: donation_amount }
+        amount_or_rate: { type: literal, value: 100000 }
+        result_field: tax_donation_exemption
+      explanation:
+        title: "Abattement donation parent-enfant"
+        detail: "100 000 € d'abattement par parent et par enfant, renouvelable tous les 15 ans."
+        source_url: "https://www.bofip.impots.gouv.fr/bofip/15200"
+        uncertainty_level: low
+      source:
+        reference: "CGI art. 779"
+        type: law
+      priority: 10
+      applies_to: [donation]
+
+    # --- FR008 : Convention France-USA — élimination double imposition dividendes ---
+    - id: FR008
+      type: treaty
+      condition:
+        operator: and
+        operands:
+          - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: FR }] }
+          - { operator: function, operands: [{ name: has_tax_treaty, args: [{ path: event.details.source_country }, { type: literal, value: US }] }] }
+      effect:
+        type: treaty
+        treaty_id: FR_US
+        article: "10"
+        override_rate: { type: literal, value: 0.15 }  # 15 % au lieu de 30 %
+        result_field: tax_treaty_dividend_us
+      explanation:
+        title: "Convention France-États-Unis — dividendes"
+        detail: "Taux réduit à 15 % sur les dividendes de source US perçus par un résident FR (au lieu de 30 % de retenue à la source interne US)."
+        source_url: "https://www.legifrance.gouv.fr/conv_tir/id/TRAITEEVENT/000044777122"
+        uncertainty_level: low
+      source:
+        reference: "Convention fiscale France-États-Unis, art. 10"
+        type: treaty
+      priority: 5
+      applies_to: [dividend]
+
+    rules_ch_2026:
+      jurisdiction: CH
+      tax_year: 2026
+      rules:
+        # --- CH001 : Impôt fédéral direct — barème progressif sur le revenu ---
+        - id: CH001
+          type: bracket
+          condition:
+            operator: eq
+            operands:
+              - { path: user.tax_residencies[0].country_code }
+              - { type: literal, value: CH }
+          effect:
+            type: bracket
+            base: { path: taxable_income_chf }
+            brackets:
+              - from: { type: literal, value: 0 }
+                to: { type: literal, value: 14800 }
+                rate: { type: literal, value: 0.0 }
+              - from: { type: literal, value: 14800 }
+                to: { type: literal, value: 31600 }
+                rate: { type: literal, value: 0.0077 }
+              - from: { type: literal, value: 31600 }
+                to: { type: literal, value: 43000 }
+                rate: { type: literal, value: 0.0088 }
+              - from: { type: literal, value: 43000 }
+                to: { type: literal, value: 57400 }
+                rate: { type: literal, value: 0.0264 }
+              - from: { type: literal, value: 57400 }
+                to: { type: literal, value: 74600 }
+                rate: { type: literal, value: 0.0297 }
+              - from: { type: literal, value: 74600 }
+                to: { type: literal, value: 79600 }
+                rate: { type: literal, value: 0.0393 }
+              - from: { type: literal, value: 79600 }
+                to: { type: literal, value: 104700 }
+                rate: { type: literal, value: 0.0447 }
+              - from: { type: literal, value: 104700 }
+                to: { type: literal, value: null }
+                rate: { type: literal, value: 0.115 }
+            result_field: tax_ch_federal_income
+          explanation:
+            title: "Impôt fédéral direct suisse — revenu"
+            detail: "Barème progressif fédéral sur le revenu imposable. Les cantons et communes ajoutent leur propre barème (variation forte selon le canton)."
+            source_url: "https://www.estv.admin.ch/estv/fr/home/direkte-bundessteuer/privaten/berechnung.html"
+            uncertainty_level: low
+          source:
+            reference: "LIFD art. 1 et suivants"
+            type: law
+          priority: 10
+          applies_to: [income]
+
+        # --- CH002 : Impôt fortune (cantonale) ---
+        - id: CH002
+          type: bracket
+          condition:
+            operator: eq
+            operands:
+              - { path: user.tax_residencies[0].country_code }
+              - { type: literal, value: CH }
+          effect:
+            type: bracket
+            base: { path: net_wealth_chf }
+            brackets:
+              - from: { type: literal, value: 0 }
+                to: { type: literal, value: 50000 }
+                rate: { type: literal, value: 0.0 }
+              - from: { type: literal, value: 50000 }
+                to: { type: literal, value: null }
+                rate: { type: literal, value: 0.0005 }  # exemple simplifié, varie par canton
+            result_field: tax_ch_wealth_canton
+          explanation:
+            title: "Impôt sur la fortune (cantonale)"
+            detail: "L'impôt fortune est principalement cantonal. Barèmes très variables selon le canton de domicile. Seuil d'imposition et taux indicatifs."
+            source_url: "https://www.ch.ch/fr/impot-sur-la-fortune/"
+            uncertainty_level: high  # dépend du canton
+          source:
+            reference: "Loi cantonale sur l'impôt fortune"
+            type: regulation
+          priority: 20
+          applies_to: [wealth_tax]
+
+        # --- CH003 : Pilier 3a — déduction ---
+        - id: CH003
+          type: exemption
+          condition:
+            operator: and
+            operands:
+              - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: CH }] }
+              - { operator: eq, operands: [{ path: holding.tax_type }, { type: literal, value: pilier_3 }] }
+          effect:
+            type: exemption
+            base: { path: pilier_3_contribution }
+            amount_or_rate: { type: literal, value: 7056 }  # plafond 2026 (indépendant), à ajuster
+            result_field: tax_ch_pilier3_deduction
+          explanation:
+            title: "Déduction pilier 3a"
+            detail: "Déduction du revenu imposable pour les cotisations au pilier 3a, plafonnée annuellement (montant 2026 indicatif)."
+            source_url: "https://www.ahv-iv.ch/fr/prelevements/cotisations/pilier-3a"
+            uncertainty_level: medium
+          source:
+            reference: "LPP / LGPI"
+            type: law
+          priority: 15
+          applies_to: [retirement_contribution]
+
+    rules_us_2026:
+      jurisdiction: US
+      tax_year: 2026
+      rules:
+        # --- US001 : Federal long-term capital gains (0/15/20%) ---
+        - id: US001
+          type: bracket
+          condition:
+            operator: and
+            operands:
+              - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: US }] }
+              - { operator: gte, operands: [{ path: holding.holding_period_years }, { type: literal, value: 1 }] }  # long-term > 1 an
+          effect:
+            type: bracket
+            base: { path: long_term_capital_gain_usd }
+            brackets:
+              - from: { type: literal, value: 0 }
+                to: { type: literal, value: 47025 }
+                rate: { type: literal, value: 0.0 }
+              - from: { type: literal, value: 47025 }
+                to: { type: literal, value: 518900 }
+                rate: { type: literal, value: 0.15 }
+              - from: { type: literal, value: 518900 }
+                to: { type: literal, value: null }
+                rate: { type: literal, value: 0.20 }
+            result_field: tax_us_federal_ltcg
+          explanation:
+            title: "Federal long-term capital gains tax (US)"
+            detail: "Taux 0 % / 15 % / 20 % selon le revenu imposable, pour les plus-values long terme (> 1 an de détention). Le NIIT de 3,8 % s'ajoute au-dessus de seuils de revenu."
+            source_url: "https://www.irs.gov/publications/p544"
+            uncertainty_level: low
+          source:
+            reference: "IRC §1(h)"
+            type: law
+          priority: 10
+          applies_to: [capital_gain]
+
+        # --- US002 : Net Investment Income Tax (NIIT) 3.8% ---
+        - id: US002
+          type: rate
+          condition:
+            operator: and
+            operands:
+              - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: US }] }
+              - { operator: gt, operands: [{ path: modified_agi_usd }, { type: literal, value: 200000 }] }  # célibataire
+          effect:
+            type: rate
+            base: { path: net_investment_income_usd }
+            rate: { type: literal, value: 0.038 }
+            result_field: tax_us_niit
+          explanation:
+            title: "Net Investment Income Tax (NIIT)"
+            detail: "Surtaxe de 3,8 % sur le revenu net d'investissement pour les contribuables dont le MAGI dépasse 200 000 $ (célibataire) / 250 000 $ (marié)."
+            source_url: "https://www.irs.gov/newsroom/understanding-the-net-investment-income-tax"
+            uncertainty_level: low
+          source:
+            reference: "IRC §1411"
+            type: law
+          priority: 15
+          applies_to: [investment_income]
+
+        # --- US003 : §877A Exit tax — expatriation ---
+        - id: US003
+          type: timing
+          condition:
+            operator: and
+            operands:
+              - { operator: eq, operands: [{ path: event.type }, { type: literal, value: move_residence }] }
+              - { operator: eq, operands: [{ path: event.details.from_country }, { type: literal, value: US }] }
+              - { operator: or, operands: [
+                  { operator: gte, operands: [{ path: user.net_worth_usd }, { type: literal, value: 2000000 }] },
+                  { operator: gte, operands: [{ path: event.details.average_annual_tax_liability_usd }, { type: literal, value: 190000 }] }
+                ]}
+          effect:
+            type: timing
+            rule_id: US001
+            condition: { type: literal, value: true }
+            consequence: accelerate
+          explanation:
+            title: "Exit tax US (§877A IRC)"
+            detail: "Expatriation : imposition sur la plus-value latente mondiale (mark-to-market fictif) si couvert expatrié (fortune > 2 M$ ou impôt moyen > seuil). First $866,000 (2026) de gain exclu."
+            source_url: "https://www.irs.gov/individuals/international-taxpayers/expatriation-tax"
+            uncertainty_level: grey_zone
+          source:
+            reference: "IRC §877A"
+            type: law
+          priority: 1
+          applies_to: [exit_tax]
+
+        # --- US004 : 401(k) contribution — déduction ---
+        - id: US004
+          type: exemption
+          condition:
+            operator: and
+            operands:
+              - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: US }] }
+              - { operator: eq, operands: [{ path: holding.tax_type }, { type: literal, value: 401k }] }
+          effect:
+            type: exemption
+            base: { path: retirement_contribution_usd }
+            amount_or_rate: { type: literal, value: 23500 }  # plafond 2026 indicatif (under 50)
+            result_field: tax_us_401k_deduction
+          explanation:
+            title: "Déduction cotisation 401(k)"
+            detail: "Déduction du revenu imposable pour les cotisations 401(k), plafond annuel (indicatif 2026)."
+            source_url: "https://www.irs.gov/retirement-plans/plan-participant-employee/retirement-topics-401k-and-profit-sharing-plan-contribution-limits"
+            uncertainty_level: medium
+          source:
+            reference: "IRC §401(k)"
+            type: law
+          priority: 15
+          applies_to: [retirement_contribution]
+
+    rules_uk_2026:
+      jurisdiction: UK
+      tax_year: 2026
+      rules:
+        # --- UK001 : Capital Gains Tax — annual exempt amount + rates ---
+        - id: UK001
+          type: bracket
+          condition:
+            operator: and
+            operands:
+              - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: UK }] }
+          effect:
+            type: bracket
+            base: { path: chargeable_gain_after_exemption }
+            brackets:
+              - from: { type: literal, value: 0 }
+                to: { type: literal, value: 3000 }  # annual exempt amount 2026/27 (indicatif, en baisse)
+                rate: { type: literal, value: 0.0 }
+              - from: { type: literal, value: 3000 }
+                to: { type: literal, value: 50270 }
+                rate: { type: literal, value: 0.10 }  # basic rate
+              - from: { type: literal, value: 50270 }
+                to: { type: literal, value: null }
+                rate: { type: literal, value: 0.20 }  # higher rate
+            result_field: tax_uk_cgt
+          explanation:
+            title: "Capital Gains Tax (UK)"
+            detail: "Taux 10 % (bande de base) / 20 % (bande supérieure) sur les gains imposables, après annual exempt amount (3 000 £ indicatif 2026/27). Taux majorés pour les biens résidentiels (18 % / 28 %)."
+            source_url: "https://www.gov.uk/capital-gains-tax"
+            uncertainty_level: medium  # barème politique, sujet à changement budgétaire annuel
+          source:
+            reference: "Taxation of Chargeable Gains Act 1992"
+            type: law
+          priority: 10
+          applies_to: [capital_gain]
+
+        # --- UK002 : ISA — exemption ---
+        - id: UK002
+          type: exemption
+          condition:
+            operator: and
+            operands:
+              - { operator: eq, operands: [{ path: user.tax_residencies[0].country_code }, { type: literal, value: UK }] }
+              - { operator: eq, operands: [{ path: holding.tax_type }, { type: literal, value: isa }] }
+          effect:
+            type: exemption
+            base: { path: isa_gain }
+            amount_or_rate: { type: literal, value: 1.0 }  # 100% exonération
+            result_field: tax_uk_isa_exemption
+          explanation:
+            title: "ISA — exemption fiscale"
+            detail: "Plus-values et revenus dans un ISA sont exonérés d'impôt. Plafond de souscription annuel (indicatif 20 000 £)."
+            source_url: "https://www.gov.uk/individual-savings-accounts"
+            uncertainty_level: low
+          source:
+            reference: "ISA regulations"
+            type: law
+          priority: 5
+          applies_to: [capital_gain, income]
+
+# ============================================================================
+# MOTEUR D'INFÉRENCE — COMPORTEMENT ATTENDU
+# ============================================================================
+
+inference_engine:
+  type: forward_chaining
+  description: |
+    Le moteur applique les règles du DSL par itérations successives.
+    À chaque itération, il évalue toutes les règles dont la condition est vraie
+    dans le contexte courant, applique leurs effets, met à jour le contexte,
+    et recommence jusqu'à point fixe (aucune nouvelle règle applicable).
+    
+    Ordre d'application :
+    1. Par priorité (champ priority, plus bas d'abord)
+    2. Par juridiction (pays de résidence d'abord, puis pays de source)
+    3. Par type d'effet : condition → timing → exemption → bracket → rate → credit → treaty
+    
+    Explanation trace :
+    Chaque résultat contient :
+    - La liste des règles déclenchées (id, priorité, effet, valeur intermédiaire)
+    - Pour chaque règle : la condition évaluée (vraie/fausse), les valeurs des champs utilisés
+    - Les sources légales référencées
+    - Le niveau d'incertitude (low/medium/high/grey_zone)
+    - Les hypothèses faites (taux de change, valorisation estimée, etc.)
+
+  concurrency:
+    description: "Les calculs par juridiction sont parallélisables (map-reduce)."
+    max_parallel: 8
+    timeout_seconds: 2
+
+  caching:
+    description: "Cache intermédiaire par (user_id, tax_year, portfolio_hash) pour les simulations répétées."
+    ttl_seconds: 3600
+
+# ============================================================================
+# FORMAT DES TESTS FISCAUX (YAML)
+# ============================================================================
+
+test_scenario:
+  description: "Un scénario de test fiscal codifié en YAML. Le CI/CD bloque en cas de régression."
+  type: object
+  required: [scenario_key, jurisdiction, tax_year, input, expected_output]
+  properties:
+    scenario_key:
+      type: string
+    jurisdiction:
+      type: string
+    tax_year:
+      type: integer
+    description:
+      type: string
+    input:
+      $ref: '#/definitions/evaluation_context'
+    expected_output:
+      type: object
+      properties:
+        taxes_by_jurisdiction:
+          type: object
+          additionalProperties:
+            type: number
+        net_wealth_after_tax:
+          type: number
+        explanation_trace_length:
+          type: integer
+          minItems: 1
+        uncertainty_levels:
+          type: array
+          items:
+            type: string
+            enum: [low, medium, high, grey_zone]
+    tolerance:
+      type: number
+      default: 0.01
+      description: "Tolérance acceptable sur les montants (devise de référence)"
+    tags:
+      type: array
+      items:
+        type: string
+      description: [boundary, leap_year, treaty, grey_zone, regression]
+
+# Exemple de test FR (à compléter par les fiscalistes)
+example_test_fr_pfu:
+  scenario_key: FR_PFU_001
+  jurisdiction: FR
+  tax_year: 2026
+  description: "Plus-value sur compte ordinaire — PFU 30 % (12,8 % IR + 17,2 % sociaux)"
+  input:
+    user:
+      tax_residencies:
+        - country_code: FR
+          is_primary: true
+          confidence_score: 1.0
+    portfolio:
+      holdings:
+        - isin: "FR0000121014"
+          asset_class: equity
+          tax_type: compte_ordinaire
+          jurisdiction: FR
+          acquisition_date: "2024-01-15"
+          lots:
+            - acquisition_date: "2024-01-15"
+              quantity: 100
+              price_per_unit: 150
+              currency: EUR
+      current_price: 200
+      currency: EUR
+    simulation_event:
+      type: sale
+      details:
+        quantity: 100
+        sale_price_per_unit: 200
+    tax_year: 2026
+    jurisdictions: [FR]
+    fx_rates:
+      EUR: 1.0
+  expected_output:
+    taxes_by_jurisdiction:
+      FR: 5000  # gain 5000 € × 30 % = 1500 € (à ajuster selon le calcul exact)
+    net_wealth_after_tax: 18500
+    explanation_trace_length:
+      minItems: 2
+    uncertainty_levels: [low]
+  tolerance: 0.01
+  tags: [boundary, regression]
+
+# ============================================================================
+# GUIDE D'EXTENSION — AJOUTER UNE JURIDICTION
+# ============================================================================
+
+extension_guide:
+  steps:
+    - step: 1
+      action: "Créer le fichier <juridiction>_<annee>.yaml dans rules/"
+      detail: "Reprendre la structure du document (jurisdiction, tax_year, treaties, rules)."
+    - step: 2
+      action: "Codifier les règles prioritaires (IR, plus-values, fortune, successoral)"
+      detail: "Commencer par les règles à haut impact (50 règles FR, 20 CH, 15 US, 10 UK, 5 conventions)."
+    - step: 3
+      action: "Écrire les scénarios de test YAML (≥ 5 par juridiction)"
+      detail: "Chaque règle doit avoir au moins un test. Cas limites : seuils, années bissextiles, changements de loi."
+    - step: 4
+      action: "Revue externe par cabinet fiscal"
+      detail: "Contrat cadre 50 k€/an. Signature obligatoire avant mise en production."
+    - step: 5
+      action: "Déployer dans le moteur (pas de redéploiement code, mise à jour données seulement)"
+      detail: "Le DSL est interprété, pas compilé. Nouvelle juridiction = nouveau fichier YAML."
+
+  anti_patterns:
+    - "Ne jamais mettre de logique fiscale dans le code TypeScript/JavaScript."
+    - "Ne jamais hard-coder un taux, un barème ou un seuil dans une fonction."
+    - "Ne pas mélanger juridictions dans un même fichier de règles."
+    - "Ne pas omettre le niveau d'incertitude (uncertainty_level) dans l'explication."
+    - "Ne pas publier une règle sans test YAML associé."
+
+# ============================================================================
+# CONTRAINTES DE SÉCURITÉ ET CONFORMITÉ DU DSL
+# ============================================================================
+
+security:
+  - "Les fichiers de règles sont signés (GPG) et vérifiés avant chargement dans le moteur."
+  - "Toute modification de règle génère un audit_event (qui, quoi, quand, pourquoi)."
+  - "Les règles sont versionnées Git avec revue de code (4 eyes principle pour les règles fiscales)."
+  - "Le moteur ne fait pas d'éval() ni d'exécution de code dynamique depuis le DSL."
+  - "L'expression engine est sandboxé (pas d'accès réseau, pas d'accès fichier, pas d'exécution système)."
+
+compliance:
+  - "Moteur = simulation générique (pas de conseil en investissement personnalisé, MIFID II)."
+  - "Chaque résultat affiche les hypothèses, sources et incertitudes (transparence totale)."
+  - "Clause 'indicatif' affichée sur chaque simulation : non opposable à l'administration fiscale."
+  - "Revue externe trimestrielle obligatoire avant toute mise en production de nouvelles règles."

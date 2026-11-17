@@ -1,0 +1,21 @@
+# render.yaml - Configuration de déploiement automatique pour Render
+services:
+  - type: web
+    name: opt-orchestrateur-patrimoine
+    runtime: node
+    buildCommand: "npm install && npm run build"
+    startCommand: "npm run start"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: opt-db
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+
+databases:
+  - name: opt-db
+    databaseName: opt
+    user: opt_user
+    plan: free # Attention : la base gratuite s'éteint après inactivité
+    region: frankfurt # EU-Central : respect du RGPD/Data Residency

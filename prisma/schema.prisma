@@ -1,0 +1,235 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Organization {
+  id               String   @id @default(uuid())
+  name             String
+  slug             String   @unique
+  plan             String   @default("starter")
+  billingEmail     String?
+  stripeCustomerId String?
+  encryptionKeyId  String?
+  settings         Json     @default("{}")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  users       User[]
+  accounts    Account[]
+  simulations Simulation[]
+}
+
+model User {
+  id             String   @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  email          String   @unique
+  passwordHash   String
+  firstName      String?
+  lastName       String?
+  phone          String?
+  language       String   @default("fr")
+  role           String   @default("user")
+  mfaEnabled     Boolean  @default(false)
+  mfaSecret      String?
+  emailVerified  Boolean  @default(false)
+  kycStatus      String   @default("pending")
+  kycProviderRef String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  taxResidencies   TaxResidency[]
+  accounts         Account[]
+  simulations      Simulation[]
+  validatedRules   TaxRule[]      @relation("RuleValidator")
+  auditEvents      AuditEvent[]   @relation("Actor")
+  portfolios       Portfolio[]
+}
+
+model Portfolio {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  name      String
+  accounts  Account[]
+  createdAt DateTime @default(now())
+}
+
+model TaxResidency {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id])
+  countryCode         String
+  startDate           DateTime
+  endDate             DateTime?
+  isPrimary           Boolean  @default(false)
+  determinationMethod String
+  confidenceScore     Float?
+  sourceData          Json?
+  createdAt           DateTime @default(now())
+  createdBy           String?
+}
+
+model Account {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  portfolioId    String?
+  portfolio      Portfolio? @relation(fields: [portfolioId], references: [id])
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  provider       String
+  externalId     String?
+  accountType    String
+  currency       String   @default("EUR")
+  name           String?
+  iban           String?
+  bic            String?
+  isActive       Boolean  @default(true)
+  syncStatus     String   @default("idle")
+  lastSyncAt     DateTime?
+  lastError      String?
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  holdings     Holding[]
+  transactions Transaction[]
+}
+
+model Holding {
+  id              String   @id @default(uuid())
+  accountId       String
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  isin            String?
+  internalId      String?
+  cfiCode         String?
+  assetClass      String
+  assetName       String   // Added for UI display
+  quantity        Decimal  @db.Decimal(20, 8)
+  currency        String   @default("EUR")
+  currentPrice    Decimal? @db.Decimal(20, 8)
+  currentPriceAt  DateTime?
+  costBasis       Decimal? @db.Decimal(20, 8)
+  taxType         String?
+  jurisdiction    String?
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  lots         Lot[]
+  transactions Transaction[]
+}
+
+model Lot {
+  id                String   @id @default(uuid())
+  holdingId         String
+  holding           Holding  @relation(fields: [holdingId], references: [id], onDelete: Cascade)
+  acquisitionDate   DateTime
+  quantity          Decimal  @db.Decimal(20, 8)
+  quantityRemaining Decimal  @db.Decimal(20, 8)
+  pricePerUnit      Decimal  @db.Decimal(20, 8)
+  currency          String
+  fees              Decimal  @default(0) @db.Decimal(20, 8)
+  source            String
+  sourceRef         String?
+  createdAt         DateTime @default(now())
+
+  transactions Transaction[]
+}
+
+model Transaction {
+  id              String   @id @default(uuid())
+  accountId       String
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  holdingId       String?
+  holding         Holding? @relation(fields: [holdingId], references: [id])
+  lotId           String?
+  lot             Lot?     @relation(fields: [lotId], references: [id])
+  transactionType String
+  transactionDate DateTime
+  settlementDate  DateTime?
+  quantity        Decimal? @db.Decimal(20, 8)
+  pricePerUnit    Decimal? @db.Decimal(20, 8)
+  grossAmount     Decimal? @db.Decimal(20, 8)
+  fees            Decimal  @default(0) @db.Decimal(20, 8)
+  taxWithheld     Decimal  @default(0) @db.Decimal(20, 8)
+  netAmount       Decimal? @db.Decimal(20, 8)
+  currency        String
+  fxRate          Decimal? @db.Decimal(20, 8)
+  reference       String?
+  isReconciled    Boolean  @default(false)
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+}
+
+model Simulation {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id])
+  organizationId   String?
+  organization     Organization? @relation(fields: [organizationId], references: [id])
+  name             String
+  scenarioType     String
+  inputData        Json
+  resultData       Json
+  explanationTrace Json
+  taxYear          Int?
+  jurisdictions    String[]
+  confidenceScore  Float?
+  status           String   @default("draft")
+  createdAt        DateTime @default(now())
+  computedAt       DateTime?
+}
+
+model TaxRule {
+  id               String   @id @default(uuid())
+  jurisdiction     String
+  taxYear          Int
+  ruleKey          String
+  ruleVersion      Int      @default(1)
+  dslYaml          String
+  sourceReference  String?
+  isActive         Boolean  @default(true)
+  validatedBy      String?
+  validator        User?    @relation("RuleValidator", fields: [validatedBy], references: [id])
+  validatedAt      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([jurisdiction, taxYear, ruleKey, ruleVersion])
+}
+
+model TaxTestScenario {
+  id              String   @id @default(uuid())
+  jurisdiction    String
+  taxYear         Int
+  scenarioKey     String
+  inputData       Json
+  expectedOutput  Json
+  tolerance       Decimal  @default(0) @db.Decimal(10, 2)
+  isAutoGenerated Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model AuditEvent {
+  id         String   @id @default(uuid())
+  eventType  String
+  actorId    String?
+  actor      User?    @relation("Actor", fields: [actorId], references: [id])
+  actorType  String
+  targetType String
+  targetId   String?
+  payload    Json     @default("{}")
+  hash       String?  // for hash-chaining
+  prevHash   String?
+  createdAt  DateTime @default(now())
+}

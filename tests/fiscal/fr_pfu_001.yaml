@@ -1,0 +1,49 @@
+# tests/fiscal/fr_pfu_001.yaml — Scénario de test fiscal FR PFU
+# Conforme à TAX_ENGINE_DSL_SPEC.yaml — format des tests fiscaux
+
+scenario_key: FR_PFU_001
+jurisdiction: FR
+tax_year: 2026
+description: "Plus-value sur compte ordinaire — PFU 30% (12,8% IR + 17,2% prélèvements sociaux)"
+tags: [boundary, regression]
+
+input:
+  user:
+    tax_residencies:
+      - country_code: FR
+        is_primary: true
+        confidence_score: 1.0
+  portfolio:
+    total_net_worth: 20000
+    holdings:
+      - isin: "FR0000121014"
+        asset_class: equity
+        tax_type: compte_ordinaire
+        jurisdiction: FR
+        acquisition_date: "2024-01-15"
+        lots:
+          - acquisition_date: "2024-01-15"
+            quantity: 100
+            price_per_unit: 150
+            currency: EUR
+    current_price: 200
+    currency: EUR
+  simulation_event:
+    type: sale
+    details:
+      quantity: 100
+      sale_price_per_unit: 200
+  tax_year: 2026
+  jurisdictions: [FR]
+  fx_rates:
+    EUR: 1.0
+
+expected_output:
+  taxes_by_jurisdiction:
+    FR: 1500  # Gain 5000 € × 30% = 1500 €
+  net_wealth_after_tax: 18500
+  explanation_trace_length:
+    min_items: 1
+  uncertainty_levels: [low]
+
+tolerance: 0.01
